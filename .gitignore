@@ -1,0 +1,14 @@
+# Local Arduino and editor output
+.arduino/
+.pio/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.log
+
+# Local credentials and private configuration
+*.local
+secrets/
+credentials/

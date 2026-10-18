@@ -1,0 +1,285 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32-CAM 门禁识别</title>
+<style>
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Arial, Helvetica, sans-serif;
+  background: #151515;
+  color: #f4f4f4;
+  font-size: 16px;
+}
+.shell {
+  width: min(920px, 100%);
+  margin: 0 auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 320px;
+  gap: 12px;
+}
+.viewer {
+  min-width: 0;
+}
+#stream {
+  display: block;
+  width: 100%;
+  background: #050505;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+}
+.panel {
+  min-width: 0;
+}
+#status-display {
+  min-height: 52px;
+  padding: 13px 12px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  background: #3b3b3b;
+  text-align: center;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 26px;
+}
+#person {
+  display: block;
+  width: 100%;
+  height: 50px;
+  border: 0;
+  padding: 0 12px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  font-size: 18px;
+  outline: 0;
+}
+.buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+button {
+  height: 42px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #fff;
+  background: #f42f38;
+  font-size: 18px;
+  font-weight: 700;
+  outline: 0;
+}
+button:hover {
+  background: #ff4750;
+}
+button:active {
+  background: #df2028;
+}
+button:disabled {
+  cursor: default;
+  background: #777;
+}
+.wide {
+  grid-column: 1 / -1;
+}
+h3 {
+  margin: 16px 0 6px;
+  font-size: 22px;
+}
+ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 18px;
+}
+.delete {
+  min-width: 34px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #f42f38;
+  color: #fff;
+  text-align: center;
+  line-height: 26px;
+  cursor: pointer;
+  font-size: 15px;
+}
+@media (max-width: 760px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+  .panel {
+    width: 100%;
+  }
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <section class="viewer">
+    <img id="stream" src="" alt="">
+  </section>
+  <section class="panel">
+    <div id="status-display"><span id="current-status">等待连接</span></div>
+    <input id="person" type="text" value="" placeholder="请输入姓名">
+    <div class="buttons">
+      <button id="button-stream">视频预览</button>
+      <button id="button-detect">检测人脸</button>
+      <button id="button-capture">录入人脸</button>
+      <button id="button-recognise">门禁识别</button>
+    </div>
+    <h3>已录入人脸</h3>
+    <ul></ul>
+    <div class="buttons">
+      <button id="delete_all" class="wide">全部删除</button>
+    </div>
+  </section>
+</main>
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+  const WS_URL = "ws://" + window.location.host + ":82";
+  const ws = new WebSocket(WS_URL);
+
+  const view = document.getElementById("stream");
+  const statusText = document.getElementById("current-status");
+  const statusBox = document.getElementById("status-display");
+  const personField = document.getElementById("person");
+  const streamButton = document.getElementById("button-stream");
+  const detectButton = document.getElementById("button-detect");
+  const captureButton = document.getElementById("button-capture");
+  const recogniseButton = document.getElementById("button-recognise");
+  const deleteAllButton = document.getElementById("delete_all");
+
+  let audioContext = null;
+
+  function setStatus(text) {
+    statusText.textContent = text;
+    if (text.indexOf("通过") >= 0 || text.indexOf("打开") >= 0 || text.indexOf("完成") >= 0) {
+      statusBox.style.background = "#207a3c";
+    } else if (text.indexOf("拒绝") >= 0 || text.indexOf("失败") >= 0 || text.indexOf("不是") >= 0) {
+      statusBox.style.background = "#8a2630";
+    } else {
+      statusBox.style.background = "#3b3b3b";
+    }
+  }
+
+  function playDoorSound() {
+    if (!audioContext) {
+      audioContext = new AudioContext();
+    }
+    const now = audioContext.currentTime;
+    [520, 780].forEach((freq, index) => {
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      osc.type = "square";
+      osc.frequency.value = freq;
+      gain.gain.value = 0.04;
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.start(now + index * 0.08);
+      osc.stop(now + index * 0.08 + 0.07);
+    });
+  }
+
+  ws.onopen = () => {
+    setStatus("已连接");
+  };
+
+  ws.onmessage = message => {
+    if (typeof message.data === "string") {
+      if (message.data.substr(0, 8) === "listface") {
+        addFaceToScreen(message.data.substr(9));
+      } else if (message.data === "delete_faces") {
+        deleteAllFacesFromScreen();
+      } else if (message.data === "door_open") {
+        playDoorSound();
+      } else {
+        setStatus(message.data);
+      }
+      return;
+    }
+
+    if (message.data instanceof Blob) {
+      const oldSrc = view.src;
+      const urlObject = URL.createObjectURL(message.data);
+      view.src = urlObject;
+      if (oldSrc) {
+        URL.revokeObjectURL(oldSrc);
+      }
+    }
+  };
+
+  streamButton.onclick = () => {
+    ws.send("stream");
+  };
+
+  detectButton.onclick = () => {
+    ws.send("detect");
+  };
+
+  captureButton.onclick = () => {
+    const personName = personField.value.trim();
+    if (!personName) {
+      setStatus("请先输入姓名");
+      return;
+    }
+    ws.send("capture:" + personName);
+  };
+
+  recogniseButton.onclick = () => {
+    ws.send("recognise");
+  };
+
+  deleteAllButton.onclick = () => {
+    ws.send("delete_all");
+  };
+
+  personField.oninput = () => {
+    captureButton.disabled = personField.value.trim().length === 0;
+  };
+
+  function deleteAllFacesFromScreen() {
+    const faceList = document.querySelector("ul");
+    while (faceList.firstChild) {
+      faceList.firstChild.remove();
+    }
+    captureButton.disabled = personField.value.trim().length === 0;
+  }
+
+  function addFaceToScreen(personName) {
+    const faceList = document.querySelector("ul");
+    const listItem = document.createElement("li");
+    const nameItem = document.createElement("strong");
+    const closeItem = document.createElement("span");
+
+    nameItem.textContent = personName;
+    closeItem.classList.add("delete");
+    closeItem.textContent = "删";
+    closeItem.addEventListener("click", function() {
+      ws.send("remove:" + personName);
+    });
+
+    listItem.appendChild(nameItem);
+    listItem.appendChild(closeItem);
+    faceList.appendChild(listItem);
+  }
+
+  captureButton.disabled = true;
+});
+</script>
+</body>
+</html>
